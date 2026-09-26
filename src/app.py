@@ -2,6 +2,12 @@ import html
 import os
 import sys
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 import joblib
 import pandas as pd
 import streamlit as st
@@ -11,7 +17,6 @@ BASE_DIR = os.path.dirname(SRC_DIR)
 sys.path.insert(0, SRC_DIR)
 
 from predict import (  # noqa: E402
-    PROVIDER_CONFIGS,
     RANDOM_MODEL_LABEL,
     fetch_available_models,
     generate_suggested_response,
@@ -122,8 +127,9 @@ st.markdown(
     }
     .st-key-card_inside [data-testid="stCaptionContainer"] { color: #888888 !important; }
     .st-key-card_inside hr { border-color: #dddddd !important; margin: 1.5rem 0 !important; }
-    [data-testid="stSidebar"] { background: #f7faff; }
-    [data-testid="stSidebar"] * { color: #23375a; }
+    [data-testid="stSidebar"], [data-testid="collapsedControl"] {
+        display: none !important;
+    }
 
     /* Animations */
     .st-key-ticket_front_card { animation: flipBack .65s cubic-bezier(.2,.72,.22,1) both; }
@@ -207,42 +213,18 @@ except Exception as exc:
     vectorizer, model = None, None
     model_error = str(exc)
 
-with st.sidebar:
-    st.title("⚙️ LLM settings")
-    st.caption("Use the top-left sidebar toggle to close or reopen this panel.")
-    llm_provider = st.selectbox("Provider", options=list(PROVIDER_CONFIGS), key="llm_provider")
-    env_key = PROVIDER_CONFIGS[llm_provider].get("env_key", "GROQ_API_KEY")
-    default_key = os.environ.get(env_key, "")
-    api_key = st.text_input("API key", value=default_key, type="password",
-                            help=f"Or set {env_key} in your environment.", key=f"api_key_{llm_provider}")
-    custom_base_url = None
-    if llm_provider == "Custom (OpenAI-Compatible)":
-        custom_base_url = st.text_input("API base URL", value="http://localhost:11434/v1",
-                                        key="custom_base_url")
-    can_query_models = bool(api_key.strip()) or llm_provider == "Custom (OpenAI-Compatible)"
-    available_models = []
-    if can_query_models:
-        try:
-            available_models = fetch_available_models(llm_provider, api_key, custom_base_url) or []
-        except Exception as exc:
-            st.caption(f"Model discovery unavailable: {exc}")
-    model_choices = [RANDOM_MODEL_LABEL] + [m for m in available_models if m != RANDOM_MODEL_LABEL]
-    selected_model_option = st.selectbox("Response model", model_choices, key="response_model")
-    if not can_query_models:
-        st.info("Add an API key to enable AI-generated replies. Classification still works without one.")
-    elif available_models:
-        st.caption(f"{len(available_models)} models available. Random mode picks one for each request.")
-    else:
-        st.warning("No models discovered. Check the key/endpoint; a template reply will be used if generation fails.")
-    st.divider()
-    st.subheader("Supported categories")
-    for name, (icon, _) in CATEGORY_META.items():
-        st.write(f"{icon} {name}")
-    st.divider()
-    if model is None or vectorizer is None:
-        st.error("Classifier unavailable. Run `python src/train.py` first.")
-    else:
-        st.success("Classifier ready")
+groq_api_key = os.environ.get("GROQ_API_KEY", "").strip()
+
+available_models = []
+if groq_api_key:
+    try:
+        available_models = fetch_available_models(provider="Groq", api_key=groq_api_key) or []
+    except Exception:
+        available_models = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
+else:
+    available_models = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
+
+can_query_models = bool(groq_api_key)
 
 st.markdown('<div class="page-kicker">SMART SUPPORT · INSTANT TRIAGE</div>', unsafe_allow_html=True)
 
@@ -283,15 +265,19 @@ with st.container(key=card_key):
                         st.error(f"Classification failed: {exc}")
                     else:
                         if not can_query_models:
-                            response_info = fallback_info(r["predicted_category"])
+                            response_info = fallback_info(
+                                r["predicted_category"],
+                                "GROQ_API_KEY is not set in the .env file. Showing template response."
+                            )
                         else:
                             try:
-                                with st.spinner("Generating a suggested response…"):
+                                with st.spinner("Generating AI response with Groq…"):
                                     response_info = generate_suggested_response(
                                         ticket_text=ticket_description,
                                         predicted_category=r["predicted_category"],
-                                        api_key=api_key, provider=llm_provider,
-                                        model_name=selected_model_option, base_url=custom_base_url,
+                                        api_key=groq_api_key,
+                                        provider="Groq",
+                                        model_name=RANDOM_MODEL_LABEL,
                                         model_pool=available_models,
                                     )
                             except Exception as exc:
@@ -343,19 +329,21 @@ with st.container(key=card_key):
                 model_name = resp_info.get("model") or "N/A"
                 st.caption(f"Source: {source}" + (f" · Model: {model_name}" if resp_info.get("success") else ""))
                 if resp_info.get("error"):
-                    st.warning(f"AI response unavailable: {resp_info['error']}. Showing a template instead.")
+                    st.warning(f"AI response note: {resp_info['error']}")
                 st.code(response_text, language=None)
                 st.caption("Use the copy icon in the box above to copy the reply.")
                 if st.button("🔄 Regenerate response", use_container_width=True, key="regenerate"):
                     if not can_query_models:
-                        st.info("Add an API key in the sidebar to generate an AI response.")
+                        st.info("GROQ_API_KEY is not set in the .env file.")
                     else:
                         try:
-                            with st.spinner("Generating a fresh reply…"):
+                            with st.spinner("Generating a fresh Groq reply…"):
                                 new_response = generate_suggested_response(
-                                    ticket_text=result["ticket_text"], predicted_category=category,
-                                    api_key=api_key, provider=llm_provider,
-                                    model_name=selected_model_option, base_url=custom_base_url,
+                                    ticket_text=result["ticket_text"],
+                                    predicted_category=category,
+                                    api_key=groq_api_key,
+                                    provider="Groq",
+                                    model_name=RANDOM_MODEL_LABEL,
                                     model_pool=available_models,
                                 )
                         except Exception as exc:
@@ -366,5 +354,5 @@ with st.container(key=card_key):
                     st.session_state.card_side = "front"
                     st.rerun()
     
-st.markdown('<div class="page-footer">Built for faster, more thoughtful customer support · ⚙️ Open the top-left sidebar for LLM settings</div>',
+st.markdown('<div class="page-footer">Built for faster, more thoughtful customer support · Powered by Groq AI</div>',
             unsafe_allow_html=True)

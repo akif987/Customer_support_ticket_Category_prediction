@@ -26,6 +26,16 @@ Shared and comparison outputs are saved as:
 - `screenshots/model_comparison.png`
 - `screenshots/confusion_matrix.png`
 
+## Configuration
+
+Add your Groq API key in a `.env` file at the root of the repository:
+
+```text
+GROQ_API_KEY=your_groq_api_key_here
+```
+
+*(Note: `.env` is ignored by `.gitignore` so your API key remains secure and private.)*
+
 ## Run the application
 
 After training, start the Streamlit application:
