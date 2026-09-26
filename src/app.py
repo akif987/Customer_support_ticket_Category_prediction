@@ -20,7 +20,13 @@ SRC_DIR = os.path.dirname(os.path.abspath(__file__))
 BASE_DIR = os.path.dirname(SRC_DIR)
 sys.path.insert(0, SRC_DIR)
 
-from predict import generate_suggested_response, predict  # noqa: E402
+from predict import (  # noqa: E402
+    PROVIDER_CONFIGS,
+    RANDOM_MODEL_LABEL,
+    fetch_available_models,
+    generate_suggested_response,
+    predict,
+)
 
 # ---------------------------------------------------------------------------
 # Page configuration
@@ -191,30 +197,57 @@ with st.sidebar:
         st.markdown(f"{meta['icon']} **{name}**")
     st.divider()
 
-    st.subheader("⚡ Groq API Settings")
-    groq_api_key = st.text_input(
-        "Groq API Key",
-        type="password",
-        value=os.environ.get("GROQ_API_KEY", ""),
-        help="Enter your Groq API key (starts with gsk_). Can also be set in GROQ_API_KEY env var.",
-        placeholder="gsk_...",
-    )
-    GROQ_MODELS = [
-        "openai/gpt-oss-20b",
-        "openai/gpt-oss-120b",
-        "qwen/qwen3.8-27b",
-        "allam-2-7b",
-    ]
-    groq_model = st.selectbox(
-        "Groq Chat Model",
-        options=GROQ_MODELS,
+    st.subheader("⚡ LLM API Settings")
+    llm_provider = st.selectbox(
+        "LLM Provider",
+        options=list(PROVIDER_CONFIGS.keys()),
         index=0,
-        help="Select a generative chat model to draft replies (Prompt Guard models are classifiers and cannot generate text).",
+        help="Select any LLM API provider or connect an OpenAI-compatible endpoint.",
     )
-    if groq_api_key.strip():
-        st.success("🟢 Groq API Key Configured")
+
+    env_var_name = PROVIDER_CONFIGS[llm_provider].get("env_key", "GROQ_API_KEY")
+    default_key = (
+        os.environ.get(env_var_name, "")
+        or os.environ.get("GROQ_API_KEY", "")
+        or os.environ.get("OPENAI_API_KEY", "")
+    )
+
+    api_key = st.text_input(
+        f"{llm_provider} API Key",
+        type="password",
+        value=default_key,
+        help=f"Enter your API key. Can also be set in {env_var_name} environment variable.",
+        placeholder="gsk_..." if llm_provider == "Groq" else "sk-...",
+    )
+
+    custom_base_url = None
+    if llm_provider == "Custom (OpenAI-Compatible)":
+        custom_base_url = st.text_input(
+            "API Base URL",
+            value="http://localhost:11434/v1",
+            help="Custom endpoint base URL (e.g. Ollama, LM Studio, vLLM, or custom proxy).",
+        )
+
+    # Dynamically fetch available models from provider
+    available_models = fetch_available_models(llm_provider, api_key, custom_base_url)
+    model_choices = [RANDOM_MODEL_LABEL] + available_models
+
+    selected_model_option = st.selectbox(
+        "Model Selection Mode",
+        options=model_choices,
+        index=0,
+        help="Select '🎲 Random Model' to auto-pick a model behind the scenes on each run, or choose a fixed model.",
+    )
+
+    if selected_model_option == RANDOM_MODEL_LABEL:
+        st.caption(f"🎲 Random model rotation active across {len(available_models)} chat models.")
     else:
-        st.info("💡 Paste your Groq API Key to enable dynamic LLM responses.")
+        st.caption(f"Fixed model: `{selected_model_option}`")
+
+    if api_key.strip() or llm_provider == "Custom (OpenAI-Compatible)":
+        st.success(f"🟢 {llm_provider} Connected")
+    else:
+        st.info(f"💡 Enter your {llm_provider} API key to enable AI-powered customer replies.")
 
     st.divider()
 
@@ -303,12 +336,21 @@ if predict_clicked:
         results = predict([ticket_description])
         r = results[0]
 
-        with st.spinner("🤖 Generating suggested response with Groq LLM..."):
+        spinner_msg = (
+            f"🤖 Generating response via {llm_provider} (randomly selecting model behind the scenes)..."
+            if selected_model_option == RANDOM_MODEL_LABEL
+            else f"🤖 Generating response via {llm_provider} ({selected_model_option})..."
+        )
+
+        with st.spinner(spinner_msg):
             response_info = generate_suggested_response(
                 ticket_text=ticket_description,
                 predicted_category=r["predicted_category"],
-                api_key=groq_api_key,
-                model_name=groq_model,
+                api_key=api_key,
+                provider=llm_provider,
+                model_name=selected_model_option,
+                base_url=custom_base_url,
+                model_pool=available_models,
             )
 
         st.session_state.last_result = {
@@ -317,6 +359,7 @@ if predict_clicked:
             "probs": r["probabilities"],
             "score": r["confidence"],
             "response_info": response_info,
+            "provider": llm_provider,
         }
 
 # ---------------------------------------------------------------------------
@@ -333,8 +376,11 @@ if result:
     resp_info = result.get("response_info") or generate_suggested_response(
         ticket_text=result.get("ticket_text", ""),
         predicted_category=predicted_category,
-        api_key=groq_api_key,
-        model_name=groq_model,
+        api_key=api_key,
+        provider=llm_provider,
+        model_name=selected_model_option,
+        base_url=custom_base_url,
+        model_pool=available_models,
     )
 
     meta = CATEGORY_META.get(predicted_category, {"icon": "🏷️", "color": "#64748b"})
@@ -375,42 +421,50 @@ if result:
     # -----------------------------------------------------------------------
     st.subheader("💬 Suggested Customer Response")
 
-    is_groq = resp_info.get("success", False)
-    provider_name = resp_info.get("provider", "Rule-based Fallback")
+    is_success = resp_info.get("success", False)
+    provider_name = resp_info.get("provider", f"{llm_provider} API")
     model_name = resp_info.get("model", "N/A")
+    was_random = resp_info.get("randomly_selected", False)
 
-    badge_cls = "groq-badge" if is_groq else "fallback-badge"
-    badge_html = (
-        f'<span class="provider-badge {badge_cls}">⚡ Provider: {provider_name}</span>'
-        f'<span class="provider-badge {badge_cls}">🧠 Model: {model_name}</span>'
-    )
+    badge_cls = "groq-badge" if is_success else "fallback-badge"
+    badge_html = f'<span class="provider-badge {badge_cls}">⚡ Provider: {provider_name}</span>'
+    if was_random:
+        pool_len = len(resp_info.get("candidate_pool", []))
+        badge_html += f'<span class="provider-badge {badge_cls}">🎲 Random Model: {model_name} (Picked from {pool_len} models)</span>'
+    else:
+        badge_html += f'<span class="provider-badge {badge_cls}">🧠 Model: {model_name}</span>'
+
     st.markdown(badge_html, unsafe_allow_html=True)
 
-    if not is_groq and not groq_api_key.strip():
+    if not is_success and not api_key.strip() and llm_provider != "Custom (OpenAI-Compatible)":
         st.caption(
-            "💡 **Notice**: Enter your Groq API key in the sidebar to enable dynamic "
+            f"💡 **Notice**: Enter your {llm_provider} API key in the sidebar to enable dynamic "
             "LLM-generated responses conditioned on the customer's problem. Showing standard template below."
         )
-    elif not is_groq and resp_info.get("error"):
-        st.warning(f"Groq Notice: {resp_info.get('error')}. Displaying fallback response.")
+    elif not is_success and resp_info.get("error"):
+        st.warning(f"{llm_provider} Notice: {resp_info.get('error')}. Displaying fallback response.")
 
     st.markdown(
         f'<div class="reply-box">{resp_info["response"]}</div>',
         unsafe_allow_html=True,
     )
 
-    action_col1, action_col2, _ = st.columns([1, 1.4, 3])
+    action_col1, action_col2, _ = st.columns([1, 1.6, 2.5])
     with action_col1:
         if st.button("📋 Copy Response"):
             st.toast("Response text ready — select and copy the text box above.", icon="📋")
     with action_col2:
-        if st.button("🔄 Regenerate with Groq"):
-            with st.spinner("Regenerating with Groq..."):
+        btn_label = "🎲 Regenerate (New Random Model)" if was_random else "🔄 Regenerate Response"
+        if st.button(btn_label):
+            with st.spinner(f"Generating new response via {llm_provider}..."):
                 new_resp = generate_suggested_response(
                     ticket_text=result.get("ticket_text", ""),
                     predicted_category=predicted_category,
-                    api_key=groq_api_key,
-                    model_name=groq_model,
+                    api_key=api_key,
+                    provider=llm_provider,
+                    model_name=selected_model_option,
+                    base_url=custom_base_url,
+                    model_pool=available_models,
                 )
                 st.session_state.last_result["response_info"] = new_resp
                 st.rerun()
@@ -418,23 +472,23 @@ if result:
     # -----------------------------------------------------------------------
     # Integration architecture details (API, Model, Integration)
     # -----------------------------------------------------------------------
-    with st.expander("ℹ️ Groq API Integration & Architecture Details", expanded=False):
+    with st.expander("ℹ️ Universal LLM Integration & Architecture Details", expanded=False):
         st.markdown(
-            """
-            ### 📌 System Architecture & Groq Integration
+            f"""
+            ### 📌 Architecture Overview
 
             | Attribute | Details |
             | :--- | :--- |
-            | **API / Provider Used** | **Groq Cloud API** (`https://console.groq.com`) via official `groq` Python SDK |
-            | **Model Used** | **`openai/gpt-oss-20b`** (Primary chat model; `openai/gpt-oss-120b`, `qwen/qwen3.8-27b`, `allam-2-7b` also supported) |
-            | **Inference Hardware** | Groq Language Processing Units (LPUs) delivering ultra-low-latency generation |
+            | **Supported Providers** | **Groq**, **OpenAI**, **OpenRouter**, **DeepSeek**, or **Custom (OpenAI-Compatible)** |
+            | **Current Provider** | **{llm_provider}** |
+            | **Model Selection** | **Behind-the-Scenes Random Selection** (`{model_name}`) from active chat model pool |
             | **Task** | Automated, category-conditioned resolution drafting for support tickets |
 
             #### 🔄 Step-by-Step Integration Pipeline:
-            1. **ML Ticket Classification**: The customer's raw ticket text is cleaned and transformed via TF-IDF vectorization. A Scikit-Learn Logistic Regression model predicts the primary issue category (`Account`, `Billing`, `Fraud`, `General Inquiry`, `Technical`) and computes class probabilities.
-            2. **Prompt Conditioning**: The predicted category and original ticket text are injected into a structured system and user prompt. The system prompt directs the LLM to act as a concise, empathetic customer support specialist.
-            3. **Groq API Execution**: The payload is dispatched to Groq's Chat Completions endpoint (`client.chat.completions.create`) using the selected model (`openai/gpt-oss-20b` by default) with temperature `0.4` and max tokens `250`.
-            4. **Graceful Fallback**: If an API key is not supplied or if rate limits/network issues occur, the system smoothly falls back to a curated category-specific resolution template, ensuring zero customer downtime.
+            1. **ML Ticket Classification**: Raw ticket text is vectorized with TF-IDF, then classified by Logistic Regression into one of 5 categories (`Account`, `Billing`, `Fraud`, `General Inquiry`, `Technical`) with full confidence probability.
+            2. **Dynamic Model Discovery & Random Sampling**: The application detects all available chat models from the connected API, filters out non-generative safety/moderation models, and randomly samples a model on each invocation behind the scenes.
+            3. **Conditioned Inference Call**: Ticket description and ML-predicted category are merged into a single user message and dispatched to the Chat Completions endpoint.
+            4. **Automated Failover & Fallback**: If a randomly selected model experiences a rate limit, the system automatically tries another candidate model before falling back to domain templates.
             """
         )
 
