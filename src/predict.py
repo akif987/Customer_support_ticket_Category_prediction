@@ -20,6 +20,7 @@ import sys
 
 import httpx
 import joblib
+import numpy as np
 
 try:
     from groq import Groq
@@ -47,6 +48,24 @@ def load_artifacts():
     vectorizer = joblib.load(vectorizer_path)
     model = joblib.load(model_path)
     return vectorizer, model
+
+
+def _model_probabilities(model, features):
+    """Return probability-like scores for probabilistic and margin models."""
+    if hasattr(model, "predict_proba"):
+        return model.predict_proba(features)
+
+    if not hasattr(model, "decision_function"):
+        raise AttributeError(
+            "The saved classifier exposes neither probabilities nor decision scores."
+        )
+
+    scores = np.asarray(model.decision_function(features), dtype=float)
+    if scores.ndim == 1:
+        scores = np.column_stack((-scores, scores))
+    scores -= scores.max(axis=1, keepdims=True)
+    probabilities = np.exp(scores)
+    return probabilities / probabilities.sum(axis=1, keepdims=True)
 
 
 def predict(texts: list[str]) -> list[dict]:
@@ -81,7 +100,7 @@ def predict(texts: list[str]) -> list[dict]:
     cleaned = [_clean(t) for t in texts]
     features = vectorizer.transform(cleaned)
     predictions = model.predict(features)
-    probabilities = model.predict_proba(features)
+    probabilities = _model_probabilities(model, features)
 
     results = []
     for text, pred, probs in zip(texts, predictions, probabilities):

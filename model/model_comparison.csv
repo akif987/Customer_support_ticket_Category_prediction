@@ -1,0 +1,6 @@
+Model,Accuracy (%),Precision,Recall,F1-Score
+Logistic Regression,84.97,0.85,0.8498,0.8466
+Multinomial Naive Bayes,84.97,0.85,0.8498,0.8466
+Linear SVM,84.97,0.85,0.8498,0.8466
+Random Forest,84.9,0.8492,0.849,0.8458
+Gradient Boosting,84.85,0.8486,0.8485,0.8453
