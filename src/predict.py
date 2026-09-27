@@ -1,24 +1,23 @@
 """
 predict.py
 ----------
-Loads the trained model artefacts and predicts the issue category for one
-or more ticket descriptions supplied from the command line or via import.
+Loads the trained model artefacts and predicts the issue category for customer
+support ticket descriptions. Generates suggested customer responses using
+either a fast Groq LLM completion or a domain-specific template fallback.
 
 Usage
 -----
     # Predict a single ticket description
     python src/predict.py "I forgot my password and cannot log in."
 
-    # Predict multiple tickets (separate each with a comma-free shell approach)
+    # Predict multiple tickets
     python src/predict.py "App crashes on load" "I was charged twice" "Fraud on my card"
 """
 
 import os
-import random
 import re
 import sys
 
-import httpx
 import joblib
 import numpy as np
 
@@ -34,7 +33,7 @@ except ImportError:
     Groq = None
 
 # ---------------------------------------------------------------------------
-# Paths
+# Paths & Artifacts
 # ---------------------------------------------------------------------------
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MODEL_DIR = os.path.join(BASE_DIR, "model")
@@ -57,7 +56,7 @@ def load_artifacts():
 
 
 def _model_probabilities(model, features):
-    """Return probability-like scores for probabilistic and margin models."""
+    """Return probability scores for probabilistic and margin models."""
     if hasattr(model, "predict_proba"):
         return model.predict_proba(features)
 
@@ -74,6 +73,22 @@ def _model_probabilities(model, features):
     return probabilities / probabilities.sum(axis=1, keepdims=True)
 
 
+# ---------------------------------------------------------------------------
+# Text Cleaning & Prediction
+# ---------------------------------------------------------------------------
+def clean_text(text: str) -> str:
+    """Lowercase, strip boilerplate greetings, remove non-alpha characters."""
+    if not isinstance(text, str):
+        return ""
+    text = text.lower()
+    text = re.sub(r"hi support,?", "", text)
+    text = re.sub(r"hello,?", "", text)
+    text = re.sub(r"dear team,?", "", text)
+    text = re.sub(r"[^a-z\s]", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
 def predict(texts: list[str]) -> list[dict]:
     """
     Predict the issue category for each text in *texts*.
@@ -81,29 +96,20 @@ def predict(texts: list[str]) -> list[dict]:
     Parameters
     ----------
     texts : list[str]
-        Raw (uncleaned) ticket descriptions.
+        Raw ticket descriptions.
 
     Returns
     -------
     list[dict]
-        Each dict has keys ``text``, ``predicted_category``, ``confidence``,
-        and ``probabilities`` (a dict mapping each class to its probability).
+        Each dict contains:
+        - text: original ticket description
+        - predicted_category: predicted class name
+        - confidence: confidence score percentage
+        - probabilities: dict of category -> probability percentage
     """
     vectorizer, model = load_artifacts()
 
-    # Minimal cleaning (match preprocessing step)
-    def _clean(text: str) -> str:
-        if not isinstance(text, str):
-            return ""
-        text = text.lower()
-        text = re.sub(r"hi support,?", "", text)
-        text = re.sub(r"hello,?", "", text)
-        text = re.sub(r"dear team,?", "", text)
-        text = re.sub(r"[^a-z\s]", " ", text)
-        text = re.sub(r"\s+", " ", text).strip()
-        return text
-
-    cleaned = [_clean(t) for t in texts]
+    cleaned = [clean_text(t) for t in texts]
     features = vectorizer.transform(cleaned)
     predictions = model.predict(features)
     probabilities = _model_probabilities(model, features)
@@ -123,7 +129,7 @@ def predict(texts: list[str]) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# Rule-based fallback responses by category
+# Response Generation
 # ---------------------------------------------------------------------------
 FALLBACK_RESPONSES = {
     "Account": (
@@ -153,200 +159,27 @@ DEFAULT_FALLBACK = (
     "will respond shortly."
 )
 
-# ---------------------------------------------------------------------------
-# Universal Provider Configurations & Model Catalogs
-# ---------------------------------------------------------------------------
-RANDOM_MODEL_LABEL = "🎲 Random Model (Auto-Select Behind the Scenes)"
 
-PROVIDER_CONFIGS = {
-    "Groq": {
-        "base_url": "https://api.groq.com/openai/v1",
-        "default_models": [
-            "llama-3.3-70b-versatile",
-            "llama-3.1-8b-instant",
-            "mixtral-8x7b-32768",
-            "gemma2-9b-it",
-        ],
-        "env_key": "GROQ_API_KEY",
-    },
-    "OpenAI": {
-        "base_url": "https://api.openai.com/v1",
-        "default_models": [
-            "gpt-4o",
-            "gpt-4o-mini",
-            "gpt-3.5-turbo",
-        ],
-        "env_key": "OPENAI_API_KEY",
-    },
-    "OpenRouter": {
-        "base_url": "https://openrouter.ai/api/v1",
-        "default_models": [
-            "meta-llama/llama-3.3-70b-instruct",
-            "mistralai/mistral-7b-instruct",
-            "qwen/qwen-2.5-72b-instruct",
-            "google/gemini-2.0-flash-exp:free",
-        ],
-        "env_key": "OPENROUTER_API_KEY",
-    },
-    "DeepSeek": {
-        "base_url": "https://api.deepseek.com/v1",
-        "default_models": [
-            "deepseek-chat",
-            "deepseek-reasoner",
-        ],
-        "env_key": "DEEPSEEK_API_KEY",
-    },
-    "Custom (OpenAI-Compatible)": {
-        "base_url": "http://localhost:11434/v1",
-        "default_models": [
-            "llama3",
-            "mistral",
-            "qwen",
-        ],
-        "env_key": "LLM_API_KEY",
-    },
-}
-
-NON_CHAT_KEYWORDS = [
-    "guard", "safeguard", "whisper", "tts", "embedding", "moderation",
-    "dall-e", "davinci", "babbage", "curie", "audio", "embed"
-]
-
-
-def fetch_available_models(
-    provider: str = "Groq",
-    api_key: str | None = None,
-    base_url: str | None = None,
-) -> list[str]:
-    """
-    Fetch active chat models from the LLM provider API.
-    Filters out non-chat models (audio, moderation, guard, embedding).
-    """
-    cfg = PROVIDER_CONFIGS.get(provider, PROVIDER_CONFIGS["Groq"])
-    defaults = cfg["default_models"]
-    key = (
-        api_key
-        or os.environ.get(cfg.get("env_key", ""), "")
-        or os.environ.get("GROQ_API_KEY", "")
-        or os.environ.get("OPENAI_API_KEY", "")
-    ).strip()
-
-    if not key and provider != "Custom (OpenAI-Compatible)":
-        return list(defaults)
-
-    # 1. Native Groq SDK model discovery
-    if provider == "Groq" and Groq is not None and not base_url:
-        try:
-            client = Groq(api_key=key)
-            models = client.models.list()
-            chat_models = [
-                m.id for m in models.data
-                if not any(k in m.id.lower() for k in NON_CHAT_KEYWORDS)
-            ]
-            if chat_models:
-                return chat_models
-        except Exception:
-            pass
-
-    # 2. Universal /models endpoint over HTTPX
-    endpoint_url = (base_url or cfg["base_url"]).rstrip("/") + "/models"
-    try:
-        headers = {"Authorization": f"Bearer {key}"} if key else {}
-        resp = httpx.get(endpoint_url, headers=headers, timeout=4.0)
-        if resp.status_code == 200:
-            data = resp.json()
-            models_data = data.get("data", [])
-            chat_models = [
-                m["id"] for m in models_data
-                if isinstance(m, dict) and "id" in m and not any(k in m["id"].lower() for k in NON_CHAT_KEYWORDS)
-            ]
-            if chat_models:
-                return chat_models
-    except Exception:
-        pass
-
-    return list(defaults)
-
-
-# ---------------------------------------------------------------------------
-# Universal response generation with random model selection behind the scenes
-# ---------------------------------------------------------------------------
 def generate_suggested_response(
     ticket_text: str,
     predicted_category: str,
     api_key: str | None = None,
-    provider: str = "Groq",
-    model_name: str | None = None,
-    base_url: str | None = None,
-    model_pool: list[str] | None = None,
+    model_name: str = "llama-3.3-70b-versatile",
 ) -> dict:
     """
-    Generate an automatic customer response using any LLM API, with the ability
-    to randomly select a model behind the scenes.
-
-    Parameters
-    ----------
-    ticket_text : str
-        The customer's problem description.
-    predicted_category : str
-        The ML-classified issue category.
-    api_key : str, optional
-        API key for the selected provider.
-    provider : str, default "Groq"
-        Target provider ("Groq", "OpenAI", "OpenRouter", "DeepSeek", "Custom").
-    model_name : str, optional
-        Specific model name or RANDOM_MODEL_LABEL to auto-pick randomly.
-    base_url : str, optional
-        Custom API base URL.
-    model_pool : list[str], optional
-        Candidate models pool to randomly select from.
+    Generate an actionable customer response using Groq API (if configured),
+    or fall back to the category template response.
     """
-    cfg = PROVIDER_CONFIGS.get(provider, PROVIDER_CONFIGS["Groq"])
-    key = (
-        api_key
-        or os.environ.get(cfg.get("env_key", ""), "")
-        or os.environ.get("GROQ_API_KEY", "")
-        or os.environ.get("OPENAI_API_KEY", "")
-    ).strip()
+    key = (api_key or os.environ.get("GROQ_API_KEY", "")).strip()
 
-    if not key and provider != "Custom (OpenAI-Compatible)":
+    if not key or Groq is None:
         return {
             "response": FALLBACK_RESPONSES.get(predicted_category, DEFAULT_FALLBACK),
-            "provider": f"Fallback Template (No {provider} API Key)",
+            "provider": "Template Fallback",
             "model": "rule-based",
-            "randomly_selected": False,
-            "candidate_pool": [],
             "success": False,
-            "error": f"No {provider} API key provided. Set in sidebar or environment.",
+            "error": "Groq API key not provided or groq package not installed.",
         }
-
-    # Discover candidate models
-    candidates = model_pool or fetch_available_models(provider, key, base_url)
-    candidates = [
-        m for m in candidates
-        if not any(k in m.lower() for k in NON_CHAT_KEYWORDS)
-    ]
-    if not candidates:
-        candidates = list(cfg["default_models"])
-
-    # Determine whether random model selection was requested
-    is_random = (
-        not model_name
-        or model_name == RANDOM_MODEL_LABEL
-        or "random" in str(model_name).lower()
-    )
-
-    if is_random:
-        chosen_model = random.choice(candidates)
-    else:
-        chosen_model = model_name
-
-    # Build sequence of models to try (failsafe: retry another candidate if first fails)
-    models_to_try = [chosen_model]
-    if is_random and len(candidates) > 1:
-        other_candidates = [m for m in candidates if m != chosen_model]
-        random.shuffle(other_candidates)
-        models_to_try.extend(other_candidates[:2])
 
     prompt_content = (
         "You are an empathetic, concise, and professional customer support specialist.\n"
@@ -359,78 +192,35 @@ def generate_suggested_response(
         "Do NOT include subject lines, placeholders, or meta-explanations; reply only with the message body.\n\n"
         "Suggested Response to Customer:"
     )
-    messages = [{"role": "user", "content": prompt_content}]
 
-    last_error = None
-
-    for current_model in models_to_try:
-        try:
-            # Option 1: Native Groq SDK if provider is Groq
-            if provider == "Groq" and Groq is not None and not base_url:
-                client = Groq(api_key=key)
-                completion = client.chat.completions.create(
-                    messages=messages,
-                    model=current_model,
-                    temperature=0.4,
-                    max_tokens=250,
-                )
-                text = completion.choices[0].message.content.strip()
-                return {
-                    "response": text,
-                    "provider": f"{provider} Cloud API",
-                    "model": current_model,
-                    "randomly_selected": is_random,
-                    "candidate_pool": candidates,
-                    "success": True,
-                    "error": None,
-                }
-
-            # Option 2: Universal HTTPX client for any OpenAI-compatible provider
-            target_base = (base_url or cfg["base_url"]).rstrip("/")
-            endpoint = f"{target_base}/chat/completions"
-            headers = {"Content-Type": "application/json"}
-            if key:
-                headers["Authorization"] = f"Bearer {key}"
-
-            payload = {
-                "model": current_model,
-                "messages": messages,
-                "temperature": 0.4,
-                "max_tokens": 250,
-            }
-            resp = httpx.post(endpoint, headers=headers, json=payload, timeout=25.0)
-            if resp.status_code == 200:
-                data = resp.json()
-                text = data["choices"][0]["message"]["content"].strip()
-                return {
-                    "response": text,
-                    "provider": f"{provider} API",
-                    "model": current_model,
-                    "randomly_selected": is_random,
-                    "candidate_pool": candidates,
-                    "success": True,
-                    "error": None,
-                }
-            else:
-                last_error = f"HTTP {resp.status_code}: {resp.text}"
-
-        except Exception as exc:
-            last_error = str(exc)
-
-    return {
-        "response": FALLBACK_RESPONSES.get(predicted_category, DEFAULT_FALLBACK),
-        "provider": f"Fallback Template ({provider} Error)",
-        "model": chosen_model,
-        "randomly_selected": is_random,
-        "candidate_pool": candidates,
-        "success": False,
-        "error": last_error,
-    }
-
+    try:
+        client = Groq(api_key=key)
+        completion = client.chat.completions.create(
+            messages=[{"role": "user", "content": prompt_content}],
+            model=model_name,
+            temperature=0.4,
+            max_tokens=250,
+        )
+        text = completion.choices[0].message.content.strip()
+        return {
+            "response": text,
+            "provider": "Groq AI",
+            "model": model_name,
+            "success": True,
+            "error": None,
+        }
+    except Exception as exc:
+        return {
+            "response": FALLBACK_RESPONSES.get(predicted_category, DEFAULT_FALLBACK),
+            "provider": "Template Fallback",
+            "model": model_name,
+            "success": False,
+            "error": str(exc),
+        }
 
 
 # ---------------------------------------------------------------------------
-# CLI entry-point
+# CLI Entry Point
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
     if len(sys.argv) < 2:
@@ -453,5 +243,7 @@ if __name__ == "__main__":
         for cat, prob in sorted(r["probabilities"].items(), key=lambda x: -x[1]):
             print(f"  {cat:<18} {prob:.2f}%")
         print(f"Suggested Response [{resp_info['provider']}]:")
-        print(f"  {resp_info['response']}")
+        # Ensure safe printing on Windows consoles
+        safe_response = resp_info["response"].encode(sys.stdout.encoding or "utf-8", errors="replace").decode(sys.stdout.encoding or "utf-8")
+        print(f"  {safe_response}")
     print("-" * 60)

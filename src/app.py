@@ -17,8 +17,6 @@ BASE_DIR = os.path.dirname(SRC_DIR)
 sys.path.insert(0, SRC_DIR)
 
 from predict import (  # noqa: E402
-    RANDOM_MODEL_LABEL,
-    fetch_available_models,
     generate_suggested_response,
     predict,
 )
@@ -40,8 +38,8 @@ st.markdown(
         font-family: -apple-system, sans-serif;
     }
     .block-container { max-width: 900px; padding-top: 2.5rem; padding-bottom: 3rem; }
-    header[data-testid="stHeader"] { background: white; }
-    header[data-testid="stHeader"] button { color: black; }
+    header[data-testid="stHeader"] { background: transparent; }
+    header[data-testid="stHeader"] button { color: white; }
     #MainMenu { visibility: hidden; }
 
     /* Outer Ring */
@@ -214,16 +212,6 @@ except Exception as exc:
     model_error = str(exc)
 
 groq_api_key = os.environ.get("GROQ_API_KEY", "").strip()
-
-available_models = []
-if groq_api_key:
-    try:
-        available_models = fetch_available_models(provider="Groq", api_key=groq_api_key) or []
-    except Exception:
-        available_models = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
-else:
-    available_models = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
-
 can_query_models = bool(groq_api_key)
 
 st.markdown('<div class="page-kicker">SMART SUPPORT · INSTANT TRIAGE</div>', unsafe_allow_html=True)
@@ -276,9 +264,6 @@ with st.container(key=card_key):
                                         ticket_text=ticket_description,
                                         predicted_category=r["predicted_category"],
                                         api_key=groq_api_key,
-                                        provider="Groq",
-                                        model_name=RANDOM_MODEL_LABEL,
-                                        model_pool=available_models,
                                     )
                             except Exception as exc:
                                 response_info = fallback_info(r["predicted_category"], str(exc))
@@ -342,9 +327,6 @@ with st.container(key=card_key):
                                     ticket_text=result["ticket_text"],
                                     predicted_category=category,
                                     api_key=groq_api_key,
-                                    provider="Groq",
-                                    model_name=RANDOM_MODEL_LABEL,
-                                    model_pool=available_models,
                                 )
                         except Exception as exc:
                             new_response = fallback_info(category, str(exc))

@@ -17,7 +17,7 @@ import joblib
 import matplotlib.pyplot as plt
 import pandas as pd
 import seaborn as sns
-from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
+from sklearn.ensemble import HistGradientBoostingClassifier, RandomForestClassifier
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (
@@ -53,12 +53,12 @@ MODEL_CONFIGS = {
     "Linear SVM": ("linear_svm.pkl", LinearSVC(C=1.0, random_state=42)),
     "Random Forest": (
         "random_forest.pkl",
-        RandomForestClassifier(n_estimators=100, random_state=42, n_jobs=-1),
+        RandomForestClassifier(n_estimators=100, random_state=42, n_jobs=1),
     ),
     "Gradient Boosting": (
         "gradient_boosting.pkl",
-        GradientBoostingClassifier(
-            n_estimators=100, learning_rate=0.1, max_depth=3, random_state=42
+        HistGradientBoostingClassifier(
+            max_iter=30, learning_rate=0.1, max_depth=4, random_state=42
         ),
     ),
 }
@@ -176,8 +176,8 @@ def train():
         cm,
         annot=True,
         fmt="d",
-        xticklabels=model.classes_,
-        yticklabels=model.classes_,
+        xticklabels=best_model.classes_,
+        yticklabels=best_model.classes_,
         cmap="Blues",
     )
     plt.title(f"Confusion Matrix - {best_name}")
